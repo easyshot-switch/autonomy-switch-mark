@@ -1,0 +1,120 @@
+# easyshot-switch/autonomy-switch-mark : .github/workflows/sign.yml
+# DRAFT (Autonomy Tech Lead, 2026-10-22). Not live until Program says so.
+# Signs switch/state with the online key "switch-sign" (namespace autonomy-switch)
+# in the layout easyshot/autonomy-research jobs/switch_verify.py (#423 @ e790af71) reads:
+#   switch/state     = "<RUN|STOP>\nseq <N>\n"
+#   switch/state.sig = ssh-keygen -Y sign detached signature of switch/state
+name: sign
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "STOP (switch-sign may only sign STOP per #423; RUN is refused here)"
+        required: true
+        type: choice
+        options: [STOP]
+        default: STOP
+      seq:
+        description: "New seq, must be > current seq and <= current + 1000"
+        required: true
+        type: string
+      bootstrap:
+        description: "yes ONLY for the very first run when switch/state and switch/state.sig do not exist"
+        required: true
+        type: choice
+        options: ["no", "yes"]
+        default: "no"
+# no push / pull_request / schedule triggers on purpose
+permissions: {}
+concurrency:
+  group: switch-sign
+  cancel-in-progress: false
+jobs:
+  sign:
+    runs-on: ubuntu-24.04
+    environment: switch-sign
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    timeout-minutes: 5
+    env:
+      ACTION: ${{ inputs.action }}
+      SEQ: ${{ inputs.seq }}
+      BOOTSTRAP: ${{ inputs.bootstrap }}
+      PINNED_FP: "SHA256:OAq4pdLx5zy9tqdmBrvGEYvBLCxmRe50TXr4bcysnqY"
+      ALLEN_FP: "SHA256:KWfTn8e0epEGi0n1fnQGxxBDjdOcBI0byHVvXvccMGc"
+      BOOTSTRAP_OK: ${{ vars.SWITCH_BOOTSTRAP_OK }}
+      PINNED_PUB: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKoQuBX8R36d/CiWmrYaVL0c1ZnmkxSXFZenpdZt876j"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Validate inputs and verify current state
+        run: |
+          set -euo pipefail
+          [ "$(git rev-parse HEAD)" = "$GITHUB_SHA" ] || { echo "::error::checked-out HEAD is not GITHUB_SHA"; exit 1; }
+          [ "$PINNED_FP" != "$ALLEN_FP" ] || { echo "::error::PINNED_FP must not be the offline allen key"; exit 1; }
+          [ "$ACTION" = "STOP" ] || { echo "::error::switch-sign may sign STOP only (#423 Red Team S1); RUN needs Allen's offline key"; exit 1; }
+          printf '%s' "$SEQ" | grep -Eq '^[1-9][0-9]{0,17}$' || { echo "::error::seq must be 1-18 digits, no leading zero"; exit 1; }
+          if [ ! -e switch/state ] && [ ! -e switch/state.sig ]; then
+            [ "$BOOTSTRAP" = "yes" ] || { echo "::error::no current state; refusing unless bootstrap=yes"; exit 1; }
+            [ "$BOOTSTRAP_OK" = "yes" ] || { echo "::error::bootstrap needs one-time repo variable SWITCH_BOOTSTRAP_OK=yes (delete it right after)"; exit 1; }
+            CUR=0
+          else
+            [ "$BOOTSTRAP" = "no" ] || { echo "::error::bootstrap=yes refused: a state already exists"; exit 1; }
+            [ "$BOOTSTRAP_OK" != "yes" ] || { echo "::error::repo variable SWITCH_BOOTSTRAP_OK must be deleted once a state exists"; exit 1; }
+            [ -f switch/state ] && [ -f switch/state.sig ] || { echo "::error::switch/state or switch/state.sig missing"; exit 1; }
+            [ "$(printf '%s\n' "$PINNED_PUB" | ssh-keygen -lf - | awk '{print $2}')" = "$PINNED_FP" ] || { echo "::error::pinned key fingerprint mismatch"; exit 1; }
+            V=$(mktemp -d)
+            printf 'switch-sign namespaces="autonomy-switch" %s\n' "$PINNED_PUB" > "$V/allowed_signers"
+            ssh-keygen -Y verify -f "$V/allowed_signers" -I switch-sign -n autonomy-switch -s switch/state.sig < switch/state \
+              || { echo "::error::current switch/state signature does not verify against the pinned key"; exit 1; }
+            rm -rf "$V"
+            [ "$(wc -l < switch/state)" -eq 2 ] && grep -Eqx 'STOP|RUN' <(sed -n 1p switch/state) \
+              || { echo "::error::verified switch/state does not parse"; exit 1; }
+            CUR=$(sed -nE '2s/^seq ([1-9][0-9]{0,17})$/\1/p' switch/state)
+            [ -n "$CUR" ] || { echo "::error::current seq unreadable"; exit 1; }
+          fi
+          python3 -c 'import sys; n,c=int(sys.argv[1]),int(sys.argv[2]); sys.exit(0 if c<n<=c+1000 else 1)' "$SEQ" "$CUR" \
+            || { echo "::error::seq $SEQ must be > current $CUR and <= $CUR+1000"; exit 1; }
+          echo "current seq $CUR -> $SEQ"
+      - name: Sign and verify
+        env:
+          SWITCH_SIGN_KEY: ${{ secrets.SWITCH_SIGN_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          W=$(mktemp -d)
+          trap 'shred -u "$W/key" 2>/dev/null || true; rm -rf "$W"' EXIT
+          printf '%s\n' "$SWITCH_SIGN_KEY" > "$W/key"
+          chmod 600 "$W/key"
+          unset SWITCH_SIGN_KEY
+          # the secret's public half must be the pinned key
+          GOT=$(ssh-keygen -y -f "$W/key" | ssh-keygen -lf - | awk '{print $2}')
+          [ "$GOT" = "$PINNED_FP" ] || { echo "::error::secret key fingerprint is not the pinned switch-sign fingerprint"; exit 1; }
+          mkdir -p switch
+          printf '%s\nseq %s\n' "$ACTION" "$SEQ" > switch/state
+          ssh-keygen -Y sign -n autonomy-switch -f "$W/key" switch/state   # writes switch/state.sig
+          shred -u "$W/key"
+          # verify against the pinned public key only (same call shape as _verify_one)
+          printf 'switch-sign namespaces="autonomy-switch" %s\n' "$PINNED_PUB" > "$W/allowed_signers"
+          [ "$(printf '%s\n' "$PINNED_PUB" | ssh-keygen -lf - | awk '{print $2}')" = "$PINNED_FP" ]
+          ssh-keygen -Y verify -f "$W/allowed_signers" -I switch-sign -n autonomy-switch -s switch/state.sig < switch/state
+      - name: Commit via API (GitHub-signed, verified)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          PARENT=$(gh api "repos/$REPO/git/ref/heads/main" -q .object.sha)
+          [ "$PARENT" = "$GITHUB_SHA" ] || { echo "::error::main moved since checkout"; exit 1; }
+          BASE_TREE=$(gh api "repos/$REPO/git/commits/$PARENT" -q .tree.sha)
+          B1=$(gh api "repos/$REPO/git/blobs" -f encoding=base64 -f content="$(base64 -w0 switch/state)" -q .sha)
+          B2=$(gh api "repos/$REPO/git/blobs" -f encoding=base64 -f content="$(base64 -w0 switch/state.sig)" -q .sha)
+          TREE=$(jq -n --arg b "$BASE_TREE" --arg s1 "$B1" --arg s2 "$B2"             '{base_tree:$b, tree:[{path:"switch/state",mode:"100644",type:"blob",sha:$s1},{path:"switch/state.sig",mode:"100644",type:"blob",sha:$s2}]}'             | gh api "repos/$REPO/git/trees" --input - -q .sha)
+          # no author/committer fields: GitHub signs commits made by the Actions bot token
+          COMMIT=$(jq -n --arg t "$TREE" --arg p "$PARENT" --arg m "switch: $ACTION seq $SEQ (switch-sign, run $GITHUB_RUN_ID)"             '{message:$m, tree:$t, parents:[$p]}' | gh api "repos/$REPO/git/commits" --input - -q .sha)
+          [ "$(gh api "repos/$REPO/git/commits/$COMMIT" -q .verification.verified)" = "true" ] || { echo "::error::commit not verified"; exit 1; }
+          gh api -X PATCH "repos/$REPO/git/refs/heads/main" -f sha="$COMMIT" -F force=false
+          echo "committed $COMMIT"

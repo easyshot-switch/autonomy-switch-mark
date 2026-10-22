@@ -1,5 +1,5 @@
 # easyshot-switch/autonomy-switch-mark : .github/workflows/sign.yml
-# DRAFT (Autonomy Tech Lead, 2026-10-22). Not live until Program says so.
+# DRAFT r4 PROPOSAL (Autonomy Tech Lead, 2026-10-22). Not live until Program says so.
 # Signs switch/state with the online key "switch-sign" (namespace autonomy-switch)
 # in the layout easyshot/autonomy-research jobs/switch_verify.py (#423 @ e790af71) reads:
 #   switch/state     = "<RUN|STOP>\nseq <N>\n"
@@ -45,6 +45,7 @@ jobs:
       ALLEN_FP: "SHA256:KWfTn8e0epEGi0n1fnQGxxBDjdOcBI0byHVvXvccMGc"
       BOOTSTRAP_OK: ${{ vars.SWITCH_BOOTSTRAP_OK }}
       PINNED_PUB: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKoQuBX8R36d/CiWmrYaVL0c1ZnmkxSXFZenpdZt876j"
+      ALLEN_PUB: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINIgfTYkly1Y8hEaUInt05X/KdQtJu4S1CJ4bpwRlkmT"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -66,10 +67,13 @@ jobs:
             [ "$BOOTSTRAP_OK" != "yes" ] || { echo "::error::repo variable SWITCH_BOOTSTRAP_OK must be deleted once a state exists"; exit 1; }
             [ -f switch/state ] && [ -f switch/state.sig ] || { echo "::error::switch/state or switch/state.sig missing"; exit 1; }
             [ "$(printf '%s\n' "$PINNED_PUB" | ssh-keygen -lf - | awk '{print $2}')" = "$PINNED_FP" ] || { echo "::error::pinned key fingerprint mismatch"; exit 1; }
+            [ "$(printf '%s\n' "$ALLEN_PUB" | ssh-keygen -lf - | awk '{print $2}')" = "$ALLEN_FP" ] || { echo "::error::pinned allen key fingerprint mismatch"; exit 1; }
             V=$(mktemp -d)
-            printf 'switch-sign namespaces="autonomy-switch" %s\n' "$PINNED_PUB" > "$V/allowed_signers"
-            ssh-keygen -Y verify -f "$V/allowed_signers" -I switch-sign -n autonomy-switch -s switch/state.sig < switch/state \
-              || { echo "::error::current switch/state signature does not verify against the pinned key"; exit 1; }
+            printf 'switch-sign namespaces="autonomy-switch" %s\nallen namespaces="autonomy-switch" %s\n' "$PINNED_PUB" "$ALLEN_PUB" > "$V/allowed_signers"
+            # current state may be signed by switch-sign (online STOP) or allen (offline RUN at go-live)
+            ssh-keygen -Y verify -f "$V/allowed_signers" -I switch-sign -n autonomy-switch -s switch/state.sig < switch/state >/dev/null 2>&1 \
+              || ssh-keygen -Y verify -f "$V/allowed_signers" -I allen -n autonomy-switch -s switch/state.sig < switch/state >/dev/null 2>&1 \
+              || { echo "::error::current switch/state does not verify against pinned switch-sign or pinned allen key"; exit 1; }
             rm -rf "$V"
             [ "$(wc -l < switch/state)" -eq 2 ] && grep -Eqx 'STOP|RUN' <(sed -n 1p switch/state) \
               || { echo "::error::verified switch/state does not parse"; exit 1; }

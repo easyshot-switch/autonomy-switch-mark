@@ -41,10 +41,10 @@ jobs:
       ACTION: ${{ inputs.action }}
       SEQ: ${{ inputs.seq }}
       BOOTSTRAP: ${{ inputs.bootstrap }}
-      PINNED_FP: "SHA256:OAq4pdLx5zy9tqdmBrvGEYvBLCxmRe50TXr4bcysnqY"
+      PINNED_FP: "SHA256:pcnoBV1FMzSB98yOjVOpsei1FnyZN2rqHpijVKbC4U4"
       ALLEN_FP: "SHA256:KWfTn8e0epEGi0n1fnQGxxBDjdOcBI0byHVvXvccMGc"
       BOOTSTRAP_OK: ${{ vars.SWITCH_BOOTSTRAP_OK }}
-      PINNED_PUB: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKoQuBX8R36d/CiWmrYaVL0c1ZnmkxSXFZenpdZt876j"
+      PINNED_PUB: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMBqnQ+VeCHTsj1/+Id60y9ogH50V4b9hOxj13g33dsY"
       ALLEN_PUB: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINIgfTYkly1Y8hEaUInt05X/KdQtJu4S1CJ4bpwRlkmT"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
